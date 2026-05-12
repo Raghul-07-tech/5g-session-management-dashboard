@@ -3,98 +3,157 @@ from flask_cors import CORS
 import subprocess
 import os
 import random
+import re
 
 app = Flask(__name__)
 CORS(app)
 
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 # CONFIG
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 BASE_DIR = "/home/osboxes"
+UERANSIM_DIR = "/home/osboxes/UERANSIM"
 LOG_FILE = BASE_DIR + "/5g1/logs/ue.log"
 
 blocked_imsi = set()
 
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 # UI
-# ─────────────────────────────────────────────
+# ------------------------------------------------
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
-# ─────────────────────────────────────────────
-# gNB CONTROL
-# ─────────────────────────────────────────────
+# ------------------------------------------------
+# START gNB
+# ------------------------------------------------
 @app.route('/start_gnb')
 def start_gnb():
-    cmd = f"cd {BASE_DIR}/UERANSIM && sudo ./build/nr-gnb -c config/open5gs-gnb.yaml > {BASE_DIR}/5g1/logs/gnb.log 2>&1 &"
+
+    cmd = f"""
+    cd {UERANSIM_DIR} &&
+    sudo ./build/nr-gnb -c config/open5gs-gnb.yaml
+    > {BASE_DIR}/5g1/logs/gnb.log 2>&1 &
+    """
+
     os.system(cmd)
-    return jsonify({"status": "gNB started"})
 
+    return jsonify({
+        "status": "gNB started"
+    })
 
+# ------------------------------------------------
+# STOP gNB
+# ------------------------------------------------
 @app.route('/stop_gnb')
 def stop_gnb():
+
     os.system("pkill nr-gnb")
-    return jsonify({"status": "gNB stopped"})
 
+    return jsonify({
+        "status": "gNB stopped"
+    })
 
-# ─────────────────────────────────────────────
-# UE CONTROL
-# ─────────────────────────────────────────────
+# ------------------------------------------------
+# START UE
+# ------------------------------------------------
 @app.route('/start_ue')
 def start_ue():
-    cmd = f"cd {BASE_DIR}/UERANSIM && sudo ./build/nr-ue -c config/open5gs-ue.yaml > {LOG_FILE} 2>&1 &"
+
+    cmd = f"""
+    cd {UERANSIM_DIR} &&
+    sudo ./build/nr-ue -c config/open5gs-ue.yaml
+    > {LOG_FILE} 2>&1 &
+    """
+
     os.system(cmd)
-    return jsonify({"status": "UE started"})
 
+    return jsonify({
+        "status": "UE started"
+    })
 
+# ------------------------------------------------
+# STOP UE
+# ------------------------------------------------
 @app.route('/stop_ue')
 def stop_ue():
+
     os.system("pkill nr-ue")
-    return jsonify({"status": "UE stopped"})
 
+    return jsonify({
+        "status": "UE stopped"
+    })
 
-# ─────────────────────────────────────────────
-# LOGS
-# ─────────────────────────────────────────────
-@app.route('/logs')
-def logs():
-    try:
-        output = subprocess.getoutput(f"tail -n 20 {LOG_FILE}")
-        return jsonify(output.split("\n"))
-    except:
-        return jsonify(["No logs available"])
-
-
-# ─────────────────────────────────────────────
-# NODES (REAL STATUS)
-# ─────────────────────────────────────────────
+# ------------------------------------------------
+# REAL NODE STATUS
+# ------------------------------------------------
 @app.route('/nodes')
 def nodes():
-    def check_process(name):
+
+    def process_running(name):
         return "ONLINE" if subprocess.getoutput(f"pgrep {name}") else "OFFLINE"
 
-    def check_service(name):
+    def service_running(name):
         status = subprocess.getoutput(f"systemctl is-active {name}")
         return "ONLINE" if "active" in status else "OFFLINE"
 
     data = [
-        {"name": "gNB", "type": "antenna", "status": check_process("nr-gnb")},
-        {"name": "AMF", "type": "server", "status": check_service("open5gs-amfd")},
-        {"name": "SMF", "type": "cpu", "status": check_service("open5gs-smfd")},
-        {"name": "UPF", "type": "network", "status": check_service("open5gs-upfd")},
-        {"name": "UE",  "type": "phone", "status": check_process("nr-ue")},
+        {
+            "name": "gNB",
+            "status": process_running("nr-gnb")
+        },
+        {
+            "name": "AMF",
+            "status": service_running("open5gs-amfd")
+        },
+        {
+            "name": "SMF",
+            "status": service_running("open5gs-smfd")
+        },
+        {
+            "name": "UPF",
+            "status": service_running("open5gs-upfd")
+        },
+        {
+            "name": "UE",
+            "status": process_running("nr-ue")
+        }
     ]
 
     return jsonify(data)
 
+# ------------------------------------------------
+# REAL IMSI + CONNECTED UE COUNT
+# ------------------------------------------------
+@app.route('/ue_info')
+def ue_info():
 
-# ─────────────────────────────────────────────
-# TRUST SCORE (REAL)
-# ─────────────────────────────────────────────
+    imsi = "Disconnected"
+    connected = 0
+
+    try:
+        logs = subprocess.getoutput(f"tail -n 50 {LOG_FILE}")
+
+        match = re.search(r'imsi-\d+', logs)
+
+        if match:
+            imsi = match.group(0)
+            connected = 1
+
+    except:
+        pass
+
+    return jsonify({
+        "imsi": imsi,
+        "connected_ues": connected
+    })
+
+# ------------------------------------------------
+# TRUST SCORE
+# ------------------------------------------------
 @app.route('/trust')
 def trust():
+
     score = 0
 
     # gNB
@@ -106,47 +165,89 @@ def trust():
         score += 30
 
     # Core
-    amf = subprocess.getoutput("systemctl is-active open5gs-amfd")
-    smf = subprocess.getoutput("systemctl is-active open5gs-smfd")
-    upf = subprocess.getoutput("systemctl is-active open5gs-upfd")
+    amf = subprocess.getoutput(
+        "systemctl is-active open5gs-amfd"
+    )
 
-    if "active" in amf and "active" in smf and "active" in upf:
+    smf = subprocess.getoutput(
+        "systemctl is-active open5gs-smfd"
+    )
+
+    upf = subprocess.getoutput(
+        "systemctl is-active open5gs-upfd"
+    )
+
+    if (
+        "active" in amf and
+        "active" in smf and
+        "active" in upf
+    ):
         score += 30
 
-    # Errors
+    # Error Detection
     try:
-        logs = subprocess.getoutput(f"tail -n 20 {LOG_FILE}")
+
+        logs = subprocess.getoutput(
+            f"tail -n 20 {LOG_FILE}"
+        )
+
         if "error" in logs.lower():
             score -= 10
+
     except:
         pass
 
-    # Blocked IMSI impact
+    # IMSI BLOCK IMPACT
     if len(blocked_imsi) > 0:
         score -= 10
 
-    # Status
+    # STATUS
     if score >= 80:
         status = "SECURE"
+
     elif score >= 50:
         status = "WARNING"
+
     else:
         status = "BREACH"
 
-    return jsonify({"score": score, "status": status})
+    return jsonify({
+        "score": score,
+        "status": status
+    })
 
+# ------------------------------------------------
+# LOGS
+# ------------------------------------------------
+@app.route('/logs')
+def logs():
 
-# ─────────────────────────────────────────────
-# 🚫 IMSI BLOCK SYSTEM (NEW FEATURE)
-# ─────────────────────────────────────────────
+    try:
 
+        output = subprocess.getoutput(
+            f"tail -n 20 {LOG_FILE}"
+        )
+
+        return jsonify(output.split("\n"))
+
+    except:
+        return jsonify(["No logs available"])
+
+# ------------------------------------------------
+# BLOCK IMSI
+# ------------------------------------------------
 @app.route('/block_imsi', methods=['POST'])
 def block_imsi():
+
     data = request.json
+
     imsi = data.get("imsi")
 
     if not imsi:
-        return jsonify({"error": "IMSI required"}), 400
+
+        return jsonify({
+            "error": "IMSI required"
+        }), 400
 
     blocked_imsi.add(imsi)
 
@@ -155,10 +256,14 @@ def block_imsi():
         "imsi": imsi
     })
 
-
+# ------------------------------------------------
+# UNBLOCK IMSI
+# ------------------------------------------------
 @app.route('/unblock_imsi', methods=['POST'])
 def unblock_imsi():
+
     data = request.json
+
     imsi = data.get("imsi")
 
     blocked_imsi.discard(imsi)
@@ -168,23 +273,21 @@ def unblock_imsi():
         "imsi": imsi
     })
 
-
+# ------------------------------------------------
+# GET BLOCKED IMSI
+# ------------------------------------------------
 @app.route('/blocked_imsi')
 def get_blocked():
+
     return jsonify(list(blocked_imsi))
 
-@app.route('/live_imsi')
-def live_imsi():
+# ------------------------------------------------
+# RUN SERVER
+# ------------------------------------------------
+if __name__ == '__main__':
 
-    imsi = "001010000" + str(random.randint(100000, 999999))
-
-    return jsonify({
-        "imsi": imsi
-    })
-# ─────────────────────────────────────────────
-# RUN
-# ─────────────────────────────────────────────
-# ─────────────────────────────────────────────
-# RUN HTTPS SECURE SERVER
-# ─────────────────────────────────────────────
-app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(
+        host='0.0.0.0',
+        port=5000,
+        debug=True
+    )
